@@ -1,0 +1,3 @@
+f5-sdk
+requests
+oslo.config
