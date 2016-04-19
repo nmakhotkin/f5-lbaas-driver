@@ -201,8 +201,8 @@ class F5Driver(base.LoadBalancerDriver):
         all_members = pool.members_s.get_collection()
 
         for mem in all_members:
-            # Search by first part of name (before service port).
-            if mem.name.split(':')[0] == member_name:
+            # Search by name.
+            if mem.name == member_name:
                 return mem
 
     def create_listener(self, listener):
@@ -215,13 +215,16 @@ class F5Driver(base.LoadBalancerDriver):
             listener.address = '0.0.0.0'
 
         # Create a new pool associated with current virtual server.
+        # Assign default ICMP monitor.
         self.bigip.pools.pool.create(
             name='pool-%s' % listener.name,
-            loadBalancingMode=listener.algorithm
+            loadBalancingMode=listener.algorithm,
+            monitor='gateway_icmp'
         )
 
         kwargs = {
             'name': 'virtual-%s' % listener.name,
+            'pool': 'pool-%s' % listener.name,
             'destination': '%s:%s' % (
                 listener.address,
                 listener.protocol_port
@@ -246,8 +249,8 @@ class F5Driver(base.LoadBalancerDriver):
             name='virtual-%s' % listener.name
         )
 
-        pool.delete()
         virtual.delete()
+        pool.delete()
 
     def apply_changes(self):
         pass
@@ -257,27 +260,45 @@ class F5Driver(base.LoadBalancerDriver):
         pool = self.bigip.pools.pool.load(
             name='pool-%s' % member.listener.name,
         )
-        mem = self._find_member_by_name(pool, 'node-%s' % member.name)
+
+        # Get parent node.
+        node = self._get_node_by_address(member.address)
+
+        # Find given member in current pool.
+        mem = self._find_member_by_name(
+            pool,
+            '%s:%s' % (node.name, member.protocol_port)
+        )
 
         mem.delete()
 
         # Try to delete parent node.
-        node = self.bigip.nodes.node.load(name='node-%s' % member.name)
         try:
             node.delete()
         except Exception as e:
             # In case if parent node is still used by any other pool member.
             LOG.warning(e)
 
+    def _get_node_by_address(self, address):
+        nodes = self.bigip.nodes.get_collection()
+
+        filtered = list(filter(lambda x: x.address == address, nodes))
+
+        return None if not filtered else filtered[0]
+
     def create_member(self, member):
-        # Create a new node.
-        node = self.bigip.nodes.node.create(
-            # params
-            name='node-%s' % member.name,
-            address=member.address,
-            monitor="default",
-            partition='Common'
-        )
+        # Try to get parent node if it already exists.
+        node = self._get_node_by_address(member.address)
+
+        if not node:
+            # Create a new node.
+            node = self.bigip.nodes.node.create(
+                # params
+                name='node-%s' % member.name,
+                address=member.address,
+                monitor="default",
+                partition='Common'
+            )
 
         pool = self.bigip.pools.pool.load(
             name='pool-%s' % member.listener.name,
